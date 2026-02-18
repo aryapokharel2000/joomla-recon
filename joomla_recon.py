@@ -1607,6 +1607,9 @@ Examples:
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    if sys.version_info < (3, 9):
+        sys.exit("joomla-recon requires Python 3.9+")
+
     try:
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

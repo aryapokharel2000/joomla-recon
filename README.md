@@ -1,21 +1,21 @@
-# Joomla Recon — Unified Joomla Vulnerability Scanner
+# Joomla Recon
 
-A standalone Python 3 tool combining the best of **JoomlaScan** and **droopescan**, with added brute-force login and live NVD CVE lookup.
+A standalone Python 3 scanner for Joomla sites. Covers version detection, component enumeration, sensitive path checks, brute-force login, and live CVE lookup.
 
 ## Features
 
 | Feature | Details |
 |---|---|
-| **Version fingerprinting** | Vote-based MD5 matching across 1,314 file hashes (Joomla 1.5 → 4.x) |
-| **Component enumeration** | 1,235 known Joomla components with sub-file and directory listing checks |
-| **Component version detection** | Reads XML manifests to extract installed component versions |
-| **Interesting URL detection** | 37 sensitive paths including `.git`, config backups, admin panel |
-| **Fake-200 detection** | Warns when the server returns 200 for all URLs (soft-404) |
-| **Redirect following** | Automatically follows HTTP→HTTPS and www redirects |
-| **Brute-force login** | Multi-threaded, streaming wordlist, lockout detection, CSRF-aware |
-| **Live NVD CVE lookup** | Real-time NIST NVD API queries for core and component CVEs |
-| **WAF evasion** | User-Agent rotation, proxy support, rate limiting, exponential back-off |
-| **JSON output** | Save results to file or stdout |
+| Version fingerprinting | Vote-based MD5 matching across 1,314 file hashes (Joomla 1.5 to 4.x) |
+| Component enumeration | 1,235 known components with sub-file and directory listing checks |
+| Component version detection | Reads XML manifests to pull installed component versions |
+| Interesting URL detection | 37 sensitive paths including .git exposure, config backups, admin panel |
+| Fake-200 detection | Warns when the server returns 200 for all URLs (soft-404 / catch-all) |
+| Redirect following | Follows HTTP to HTTPS and www redirects before scanning |
+| Brute-force login | Multi-threaded, streaming wordlist, lockout detection, CSRF-aware |
+| Live NVD CVE lookup | Real-time NIST NVD API queries for core and component CVEs |
+| WAF evasion | User-Agent rotation, proxy support, rate limiting, exponential back-off |
+| JSON output | Save full results to file or stdout |
 
 ## Requirements
 
@@ -26,7 +26,7 @@ A standalone Python 3 tool combining the best of **JoomlaScan** and **droopescan
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/joomla-recon.git
+git clone https://github.com/aryapokharel2000/joomla-recon.git
 cd joomla-recon
 pip install -r requirements.txt
 ```
@@ -106,13 +106,11 @@ Skip Phases:
 
 ## Data Files
 
-All data files are in the `data/` directory:
-
-| File | Description |
-|---|---|
-| `data/versions.xml` | 1,314 MD5 fingerprint hashes for Joomla 1.5–4.x version detection |
-| `data/comptotestdb.txt` | 1,235 known Joomla component names for enumeration |
+| File | Description | Source |
+|---|---|---|
+| `data/versions.xml` | 1,314 MD5 fingerprint hashes for Joomla 1.5 to 4.x | Version hashes sourced from droopescan |
+| `data/comptotestdb.txt` | 1,235 known Joomla component names | Component list sourced from JoomlaScan |
 
 ## Legal
 
-This tool is intended for authorized security testing only. Always obtain written permission before scanning any system you do not own.
+For authorized security testing only. Get written permission before scanning any system you do not own.
