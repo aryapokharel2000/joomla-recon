@@ -5,7 +5,7 @@ Combines JoomlaScan + droopescan + brute-force login + live NVD CVE lookup.
 
 Usage:
     python3 joomla_recon.py -u https://target.com [options]
-    python3 joomla_recon.py -u https://target.com --brute -usr admin -w rockyou.txt
+    python3 joomla_recon.py -u https://target.com --brute -user admin -w rockyou.txt
     python3 joomla_recon.py -u https://target.com --live-cve
 """
 
@@ -596,7 +596,7 @@ def run_brute(args, session: requests.Session) -> list:
     elif args.username:
         usernames = [args.username]
     else:
-        print(yellow("  [!] No username provided (use -usr or -U)"))
+        print(yellow("  [!] No username provided (use -user or -U)"))
         return []
 
     # Verify wordlist exists
@@ -1330,7 +1330,7 @@ def run_scan(args):
             print(dim(f"  [-] {label}: not found"))
 
     # ── Phase 2: Version fingerprinting ───────────────────────────────────
-    if not args.no_version:
+    if not args.no_version and not args.brute:
         print_section("Phase 2 — Version Fingerprinting (MD5 vote-based)")
         versions_db = load_versions_db(VERSIONS_XML)
         if not versions_db:
@@ -1359,26 +1359,30 @@ def run_scan(args):
                 print(yellow("  [?] Could not determine version (files may be modified or absent)"))
     else:
         print_section("Phase 2 — Version Fingerprinting")
-        print(dim("  Skipped (--no-version)"))
+        print(dim("  Skipped" + (" (brute-force mode)" if args.brute else " (--no-version)")))
 
-    # ── Phase 3: Interesting URLs ──────────────────────────────────────────
-    print_section("Phase 3 — Interesting URL Detection")
-    interesting = scan_interesting_urls(session, base_url, timeout, rl, rotate)
-    results["interesting_urls"] = interesting
-    if interesting:
-        for item in interesting:
-            status  = item["status"]
-            is_crit = "backup" in item["description"].lower() or "critical" in item["description"].lower()
-            is_admin = "admin" in item["url"].lower()
-            colour  = red if (status == 200 and (is_admin or is_crit)) else \
-                      yellow if status == 403 else cyan
-            print(f"  {colour(f'[{status}]')} {item['url']}")
-            print(dim(f"       └─ {item['description']}"))
+    # -- Phase 3: Interesting URLs ──────────────────────────────────────────
+    if not args.brute:
+        print_section("Phase 3 — Interesting URL Detection")
+        interesting = scan_interesting_urls(session, base_url, timeout, rl, rotate)
+        results["interesting_urls"] = interesting
+        if interesting:
+            for item in interesting:
+                status   = item["status"]
+                is_crit  = "backup" in item["description"].lower() or "critical" in item["description"].lower()
+                is_admin = "admin" in item["url"].lower()
+                colour   = red if (status == 200 and (is_admin or is_crit)) else \
+                           yellow if status == 403 else cyan
+                print(f"  {colour(f'[{status}]')} {item['url']}")
+                print(dim(f"       └─ {item['description']}"))
+        else:
+            print(dim("  No interesting URLs found."))
     else:
-        print(dim("  No interesting URLs found."))
+        print_section("Phase 3 — Interesting URL Detection")
+        print(dim("  Skipped (brute-force mode)"))
 
     # ── Phase 4: Component enumeration ────────────────────────────────────
-    if not args.no_components:
+    if not args.no_components and not args.brute:
         print_section(f"Phase 4 — Component Enumeration ({threads} threads)")
         components = load_components(COMPONENTS_DB)
         if not components:
@@ -1413,7 +1417,7 @@ def run_scan(args):
                 print(dim("  No known components found."))
     else:
         print_section("Phase 4 — Component Enumeration")
-        print(dim("  Skipped (--no-components)"))
+        print(dim("  Skipped" + (" (brute-force mode)" if args.brute else " (--no-components)")))
 
     # ── Phase 5: Brute-force login ─────────────────────────────────────────
     brute_creds = []
@@ -1422,14 +1426,14 @@ def run_scan(args):
         if not args.wordlist:
             print(red("  [✗] --brute requires -w / --wordlist"))
         elif not (args.username or args.userlist):
-            print(red("  [✗] --brute requires -usr / --username or -U / --userlist"))
+            print(red("  [✗] --brute requires -user / --username or -U / --userlist"))
         else:
             brute_creds = run_brute(args, session)
             if not brute_creds:
                 print(yellow("\n  [-] No valid credentials found."))
     else:
         print_section("Phase 5 — Brute-Force Login")
-        print(dim("  Skipped (add --brute -usr <user> -w <wordlist> to enable)"))
+        print(dim("  Skipped (add --brute -user <user> -w <wordlist> to enable)"))
 
     results["credentials"] = [
         {"username": c.username, "password": c.password}
@@ -1438,7 +1442,7 @@ def run_scan(args):
 
     # ── Phase 5b: Live NVD CVE lookup ─────────────────────────────────────
     live_cves = {}
-    if args.live_cve:
+    if args.live_cve and not args.brute:
         detected_ver = results["version"][0] if results["version"] else ""
         live_cves = live_cve_scan(
             session, base_url,
@@ -1450,7 +1454,10 @@ def run_scan(args):
         results["live_cves"] = live_cves
     else:
         print_section("Phase 5b — Live NVD CVE Lookup")
-        print(dim("  Skipped (add --live-cve to query NIST NVD in real time)"))
+        if args.brute:
+            print(dim("  Skipped (brute-force mode)"))
+        else:
+            print(dim("  Skipped (add --live-cve to query NIST NVD in real time)"))
 
     # ── Summary ───────────────────────────────────────────────────────────
     print_section("Scan Summary")
@@ -1510,7 +1517,7 @@ Examples:
   python3 joomla_recon.py -u https://target.com --no-components --no-version
 
   # Brute-force (single user)
-  python3 joomla_recon.py -u https://target.com --brute -usr admin -w rockyou.txt
+  python3 joomla_recon.py -u https://target.com --brute -user admin -w rockyou.txt
   # Brute-force (user list, 3 threads, 0.5s delay, pause 120s on lockout)
   python3 joomla_recon.py -u https://target.com --brute -U users.txt -w passwords.txt \\
       --brute-threads 3 --brute-delay 0.5 --lockout-pause 120 -vv
@@ -1519,7 +1526,7 @@ Examples:
   python3 joomla_recon.py -u https://target.com --live-cve
 
   # Full combo: scan + brute + live CVE + JSON output
-  python3 joomla_recon.py -u https://target.com --brute -usr admin -w rockyou.txt \\
+  python3 joomla_recon.py -u https://target.com --brute -user admin -w rockyou.txt \
       --live-cve --output json --output-file report.json
         """
     )
@@ -1562,7 +1569,7 @@ Examples:
     brute.add_argument("-w", "--wordlist", default=None,
                        help="Path to password wordlist file")
     brute_creds = brute.add_mutually_exclusive_group()
-    brute_creds.add_argument("-usr", "--username", default=None,
+    brute_creds.add_argument("-user", "--username", default=None,
                               help="Single username to try")
     brute_creds.add_argument("-U", "--userlist", default=None,
                               help="Path to username list file")
@@ -1635,7 +1642,7 @@ def main():
             print(red("[✗] --brute requires -w / --wordlist"))
             sys.exit(1)
         if not (args.username or args.userlist):
-            print(red("[✗] --brute requires -usr / --username or -U / --userlist"))
+            print(red("[✗] --brute requires -user / --username or -U / --userlist"))
             sys.exit(1)
 
     start = time.time()
