@@ -472,13 +472,38 @@ def _detect_lockout(html: str) -> bool:
     return any(phrase in lower for phrase in indicators)
 
 
-def _is_login_failure(soup: BeautifulSoup) -> bool:
     """
     Return True if the page contains a Joomla login failure alert.
-    Matches the HTB reference script exactly — only checks for
-    'alert-message' div. Avoids false positives from dashboard notices.
+    Inspects alert text to distinguish between actual login failures
+    and pos-login warnings (e.g. PHP version deprecated).
     """
-    return bool(soup.find("div", {"class": "alert-message"}))
+    # Check for the primary failure container
+    alert = soup.find("div", {"class": "alert-message"})
+    if not alert:
+        # Also check other common classes
+        for cls in ("alert-error", "alert-danger"):
+            alert = soup.find("div", class_=cls)
+            if alert: break
+            
+    if not alert:
+        return False
+        
+    text = alert.get_text().lower()
+    
+    # Known failure phrases
+    failure_phrases = [
+        "match",      # "Username and password do not match"
+        "invalid",    # "Invalid token", "Invalid session"
+        "access denied",
+        "login denied",
+    ]
+    
+    if any(phrase in text for phrase in failure_phrases):
+        return True
+        
+    # If alert exists but doesn't match a failure phrase (e.g. PHP warning),
+    # assume success (post-login dashboard warning).
+    return False
 
 
 def _try_credential(session: requests.Session, admin_url: str,
