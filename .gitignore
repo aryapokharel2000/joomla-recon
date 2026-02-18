@@ -1,7 +1,3 @@
-# Third-party source repos — DO NOT push these
-JoomlaScan/
-droopescan/
-
 # Python
 __pycache__/
 *.py[cod]

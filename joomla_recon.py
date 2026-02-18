@@ -334,10 +334,12 @@ def _nvd_severity(metrics: dict) -> tuple:
 
 
 def nvd_search(keyword: str, max_results: int = 10,
-               timeout: int = 15) -> list:
+               timeout: int = 15,
+               api_key: str = None) -> list:
     """
     Query NVD for CVEs matching *keyword*.
     Returns a list of dicts compatible with CVE_DB format.
+    Pass api_key for 50 req/30s instead of the default 5 req/30s.
     """
     try:
         params = {
@@ -345,9 +347,14 @@ def nvd_search(keyword: str, max_results: int = 10,
             "resultsPerPage": max_results,
             "startIndex": 0,
         }
+        if api_key:
+            params["apiKey"] = api_key
         resp = requests.get(NVD_API, params=params, timeout=timeout)
         if resp.status_code == 403:
-            print(yellow("  [!] NVD rate-limit hit (5 req/30s). Wait 30s or add --nvd-key."))
+            if api_key:
+                print(yellow("  [!] NVD key rejected or rate-limit hit."))
+            else:
+                print(yellow("  [!] NVD rate-limit hit (5 req/30s). Wait 30s or add --nvd-key."))
             return []
         resp.raise_for_status()
         data = resp.json()
@@ -396,7 +403,8 @@ def nvd_search(keyword: str, max_results: int = 10,
 
 
 def live_cve_scan(session, base_url: str, found_components: list,
-                  detected_version: str, timeout: int) -> dict:
+                  detected_version: str, timeout: int,
+                  api_key: str = None) -> dict:
     """
     Run live NVD queries for:
       - Joomla core (using detected version if available)
@@ -405,13 +413,17 @@ def live_cve_scan(session, base_url: str, found_components: list,
     """
     print_section("Phase 5b — Live NVD CVE Lookup")
     print(dim("  Querying NIST NVD API (rate-limit: 5 requests / 30 seconds)…"))
+    if api_key:
+        print(dim("  API key provided — using 50 req/30s rate limit."))
 
     live_results = {}
+    # Sleep between calls: 6s without key (5/30s), 0.7s with key (50/30s)
+    sleep_between = 0.7 if api_key else 6.0
 
     # Core query
     core_keyword = f"joomla {detected_version}" if detected_version else "joomla cms"
     print(dim(f"  Searching: '{core_keyword}'"))
-    core_cves = nvd_search(core_keyword, max_results=10, timeout=timeout)
+    core_cves = nvd_search(core_keyword, max_results=10, timeout=timeout, api_key=api_key)
     if core_cves:
         live_results["__core__"] = core_cves
         print(green(f"  [✓] Core: {len(core_cves)} CVE(s) found"))
@@ -425,8 +437,8 @@ def live_cve_scan(session, base_url: str, found_components: list,
         # Strip "com_" prefix for a cleaner search term
         keyword = f"joomla {name.replace('com_', '')}"
         print(dim(f"  Searching: '{keyword}'"))
-        time.sleep(6)   # NVD allows ~5 req / 30s without a key
-        cves = nvd_search(keyword, max_results=5, timeout=timeout)
+        time.sleep(sleep_between)
+        cves = nvd_search(keyword, max_results=5, timeout=timeout, api_key=api_key)
         if cves:
             live_results[name] = cves
             print(green(f"  [✓] {name}: {len(cves)} CVE(s)"))
@@ -649,8 +661,10 @@ def run_brute(args, session: requests.Session) -> list:
                                 time.sleep(args.brute_delay)
                             yield pw
 
+            # FIX: check stop/found events BEFORE each submit so we don't
+            # flood the thread pool with millions of futures for large wordlists.
             for pw in _stream_passwords():
-                if user_found.is_set():
+                if user_found.is_set() or stop_event.is_set():
                     break
                 fut = ex.submit(attempt, username, pw)
                 futures[fut] = pw
@@ -1072,7 +1086,6 @@ def fingerprint_version(session, base_url, versions_db, threads, timeout,
     if not votes:
         return []
 
-    max_votes = votes.most_common(1)[0][1]
 
     def ver_key(item):
         ver, count = item
@@ -1432,6 +1445,7 @@ def run_scan(args):
             results["components"],
             detected_ver,
             timeout,
+            api_key=args.nvd_key,
         )
         results["live_cves"] = live_cves
     else:
@@ -1606,62 +1620,6 @@ def main():
     if not parsed.netloc:
         print(red("[✗] Invalid URL."))
         sys.exit(1)
-
-    if args.nvd_key:
-        _nvd_key_val = args.nvd_key
-        def _keyed_nvd(keyword, max_results=10, timeout=15):
-            """NVD search with API key — passes key as query param (50 req/30s)."""
-            try:
-                params = {
-                    "keywordSearch":  keyword,
-                    "resultsPerPage": max_results,
-                    "startIndex":     0,
-                    "apiKey":         _nvd_key_val,   # NVD key goes in query string
-                }
-                resp = requests.get(NVD_API, params=params, timeout=timeout)
-                if resp.status_code == 403:
-                    print(yellow("  [!] NVD key rejected or rate-limit hit."))
-                    return []
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                print(yellow(f"  [!] NVD API error: {e}"))
-                return []
-            # Reuse the same parsing logic from the module-level nvd_search
-            results = []
-            for item in data.get("vulnerabilities", []):
-                cve_obj  = item.get("cve", {})
-                cve_id   = cve_obj.get("id", "UNKNOWN")
-                metrics  = cve_obj.get("metrics", {})
-                severity, score = _nvd_severity(metrics)
-                descriptions = cve_obj.get("descriptions", [])
-                desc = next(
-                    (d["value"] for d in descriptions if d.get("lang") == "en"),
-                    "No description available.",
-                )
-                affects = "See NVD for version ranges"
-                configs = cve_obj.get("configurations", [])
-                ranges = []
-                for cfg in configs:
-                    for node in cfg.get("nodes", []):
-                        for cpe_match in node.get("cpeMatch", []):
-                            start = cpe_match.get("versionStartIncluding", "")
-                            end   = cpe_match.get("versionEndIncluding",
-                                     cpe_match.get("versionEndExcluding", ""))
-                            if start or end:
-                                ranges.append(f"{start or '?'} \u2013 {end or '?'}")
-                if ranges:
-                    affects = "; ".join(ranges[:3])
-                results.append({
-                    "cve":         cve_id,
-                    "severity":    severity if severity != "UNKNOWN" else "MEDIUM",
-                    "cvss":        score,
-                    "affects":     affects,
-                    "description": desc[:200] + ("\u2026" if len(desc) > 200 else ""),
-                    "source":      "NVD (live, keyed)",
-                })
-            return results
-        globals()["nvd_search"] = _keyed_nvd
 
     if not os.path.exists(COMPONENTS_DB):
         print(yellow(f"[!] Component database not found at: {COMPONENTS_DB}"))
